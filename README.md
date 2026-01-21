@@ -17,8 +17,6 @@ Restart your shell and verify:
 
 `uv --version`
 
-You can now use `uv run python script.py` to run a script with the right Python version and envrionment.
-
 ------------------------------------------------------------------------
 
 ### Sync Python environment
@@ -32,8 +30,10 @@ uv sync
 
 This will install the right Python version and all dependencies defined in:
 
--   pyproject.toml\
--   uv.lock
+-   `pyproject.toml`
+-   `uv.lock`
+
+You can now use `uv run python script.py` to run a script with the right Python version and environment.
 
 ------------------------------------------------------------------------
 
@@ -65,7 +65,7 @@ This installs an additional R version but does not change the default, so you al
 
 ## 4. Restore R environment with renv
 
-Inside the 'r\' folder of this repo, start the correct R version:
+Inside the `r` folder of this repo, start the correct R version:
 
 `~/R/4.5.1/bin/R`
 
