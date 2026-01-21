@@ -1,7 +1,7 @@
 import os
-from pathlib import Path
 import subprocess
 import time
+from pathlib import Path
 
 import pandas as pd
 from git import Repo
@@ -10,40 +10,27 @@ from github import Auth, Github, GithubException
 from config import QUANTILES, ROOT
 from src.forecasting import generate_forecasts
 from src.r_utils import detect_rscript
-from src.realtime_utils import (
-    download_latest_data,
-    get_preceding_thursday,
-    wait_for_data,
-)
+from src.realtime_utils import download_latest_data, get_preceding_thursday
 
-# ------------------------------------------------------------------------------
-# CONFIG
-# ------------------------------------------------------------------------------
 
-RSCRIPT = detect_rscript()
-
-forecast_date = str(get_preceding_thursday(pd.Timestamp.now().date()).date())
+TARGETS = [
+    {
+        "target": "sari",
+        "source": "icosari",
+        "hub_path": "submissions/icosari/sari",
+        "branch_prefix": "sari/",
+    },
+    {
+        "target": "are",
+        "source": "agi",
+        "hub_path": "submissions/agi/are",
+        "branch_prefix": "are/",
+    },
+]
 
 HUB_REPO = "KITmetricslab/RESPINOW-Hub"
-HUB_FORK = "dwolffram/RESPINOW-Hub"
-
-# local clone of RESPINOW-realtime
-realtime_repo = Repo(ROOT)
-
-NOWCAST_BRANCH = f"nowcast/{forecast_date}"
-HHH4_BRANCH = f"hhh4/{forecast_date}"
-ML_BRANCH = f"submission/{forecast_date}"
-
-DATA_MSG = f"Update data for {forecast_date}"
-NOWCAST_MSG = f"Add nowcasts for SARI ({forecast_date})"
-HHH4_MSG = f"Add KIT-hhh4 forecasts for SARI ({forecast_date})"
-ML_MSG = f"Add KIT-LightGBM and KIT-TSMixer forecasts for SARI ({forecast_date})"
-
-
-
-# ------------------------------------------------------------------------------
-# HELPERS
-# ------------------------------------------------------------------------------
+HUB_FORK = "kit-health-statistics-acc/RESPINOW-Hub"
+ML_MODELS = [("lightgbm", "KIT-LightGBM"), ("tsmixer", "KIT-TSMixer")]
 
 
 def connect_repos():
@@ -54,26 +41,30 @@ def connect_repos():
 
 def sync_fork(fork_repo):
     fork_repo.merge_upstream("main")
-    print("🔃 Synced fork with upstream/main.")
+    print("Synced fork with upstream/main.")
+
+
+def prepare_branch(fork_repo, branch):
+    sync_fork(fork_repo)
+    create_branch(fork_repo, branch)
 
 
 def create_branch(fork_repo, branch):
-    """Create branch from main if needed."""
-    base_ref = fork_repo.get_git_ref("heads/main")
     refname = f"refs/heads/{branch}"
 
     try:
-        fork_repo.create_git_ref(ref=refname, sha=base_ref.object.sha)
-        print(f"🌱 Created branch {branch}.")
+        fork_repo.get_git_ref(f"heads/{branch}").delete()
+        print(f"Deleted old branch {branch}.")
     except GithubException as e:
-        if e.status == 422:
-            print(f"♻️ Reusing existing branch {branch}.")
-        else:
+        if e.status != 404:
             raise
+
+    base_ref = fork_repo.get_git_ref("heads/main")
+    fork_repo.create_git_ref(ref=refname, sha=base_ref.object.sha)
+    print(f"Created branch {branch}.")
 
 
 def write_file_to_branch(fork_repo, branch, file_path, content, message):
-    """Create or update file on the given branch."""
     try:
         existing = fork_repo.get_contents(file_path, ref=branch)
         fork_repo.update_file(
@@ -83,7 +74,7 @@ def write_file_to_branch(fork_repo, branch, file_path, content, message):
             sha=existing.sha,
             branch=branch,
         )
-        print(f"🔁 Updated {file_path}")
+        print(f"Updated {file_path}")
     except GithubException as e:
         if e.status == 404:
             fork_repo.create_file(
@@ -92,7 +83,7 @@ def write_file_to_branch(fork_repo, branch, file_path, content, message):
                 content=content,
                 branch=branch,
             )
-            print(f"🆕 Created {file_path}")
+            print(f"Created {file_path}")
         else:
             raise
 
@@ -104,32 +95,27 @@ def open_pr(upstream_repo, fork_repo, branch, title, body):
         head=f"{fork_repo.owner.login}:{branch}",
         base="main",
     )
-    print(f"✅ PR opened: {pr.html_url}")
+    print(f"PR opened: {pr.html_url}")
 
 
-def commit_and_push(repo, path, message):
-    """Stage path, commit if repo has changes, and push to origin."""
+def commit_and_push(repo: Repo, path: str, message: str):
     repo.git.add(path)
     if repo.is_dirty():
         repo.index.commit(message)
         repo.remote("origin").push()
-        print(f"📤 Committed & pushed: {message}")
+        print(f"Committed & pushed: {message}")
     else:
-        print(f"⚠️ No changes in {path} — skip.")
-        
+        print(f"No changes in {path}; skipping commit.")
 
-def wait_for_files(paths, timeout=300, interval=1):
-    """
-    Wait until all files in `paths` exist.
-    Raise TimeoutError after `timeout` seconds.
-    """
+
+def wait_for_files(paths, timeout=300, interval=2):
     paths = [Path(p) for p in paths]
     start = time.time()
 
     while True:
         missing = [p for p in paths if not p.exists()]
         if not missing:
-            return  # all good
+            return
 
         if time.time() - start > timeout:
             missing_str = ", ".join(str(p) for p in missing)
@@ -138,113 +124,197 @@ def wait_for_files(paths, timeout=300, interval=1):
         time.sleep(interval)
 
 
-# ------------------------------------------------------------------------------
-# MAIN PIPELINE
-# ------------------------------------------------------------------------------
+def hub_data_is_ready(source: str, target: str) -> bool:
+    path = f"https://raw.githubusercontent.com/KITmetricslab/RESPINOW-Hub/refs/heads/main/data/{source}/{target}/reporting_triangle-{source}-{target}.csv"
+    current_date = pd.Timestamp.now().date()
+    expected_date = str((get_preceding_thursday(current_date) - pd.Timedelta(days=4)).date())
+    df = pd.read_csv(path)
+    last_date = df["date"].iloc[-1]
+    print(f"{source}/{target}: last date {last_date} | expected {expected_date}")
+    return last_date == expected_date
 
 
-# --- Wait for latest data ---
-wait_for_data(interval_min=30, max_wait_hours=24)
-download_latest_data()
-commit_and_push(realtime_repo, "data", DATA_MSG)
-
-# --- R-based nowcasts and hhh4 ---
-subprocess.run(
-    [
-        RSCRIPT,
-        "--vanilla",
-        "-e",
-        (
-            f'setwd("{(ROOT / "r").as_posix()}"); '
-            "renv::activate(); "
-            "renv::restore(prompt = FALSE); "
-            f'renv::run("nowcasting/nowcasting.R", '
-            f'args = c("--disease=sari", "--forecast_date={forecast_date}")); '
-            f'renv::run("hhh4/hhh4_default.R", '
-            f'args = c("--disease=sari", "--forecast_date={forecast_date}"))'
-        ),
-    ],
-    cwd=ROOT,
-    check=True,
-)
-
-# Expected output files
-nowcast_file = ROOT / "nowcasts"/ "simple_nowcast" / f"{forecast_date}-icosari-sari-simple_nowcast.csv"
-hhh4_file = ROOT / "forecasts"/ "hhh4-coupling" / f"{forecast_date}-icosari-sari-hhh4-coupling.csv"
-
-# --- Wait for both files (to avoid empty commits) ---
-wait_for_files([nowcast_file, hhh4_file], timeout=300, interval=2)
-
-# --- local commits (RESPINOW-realtime repo) ---
-commit_and_push(realtime_repo, "nowcasts", NOWCAST_MSG)
-commit_and_push(realtime_repo, "forecasts", HHH4_MSG)
-
-# --- connect to GitHub ---
-hub_fork, hub_repo = connect_repos()
-
-# # ==========================================================================
-# # 1) Submit NOWCASTS
-# # ==========================================================================
-sync_fork(hub_fork)
-create_branch(hub_fork, NOWCAST_BRANCH)
-
-nowcast_in = ROOT / f"nowcasts/simple_nowcast/{forecast_date}-icosari-sari-simple_nowcast.csv"
-nowcast_out = f"submissions/icosari/sari/KIT-simple_nowcast/{forecast_date}-icosari-sari-KIT-simple_nowcast.csv"
-
-df = pd.read_csv(nowcast_in)
-df = df.loc[(df["type"] != "quantile") | (df["quantile"].isin(QUANTILES))]
-content = df.to_csv(index=False)
-
-write_file_to_branch(hub_fork, NOWCAST_BRANCH, nowcast_out, content, NOWCAST_MSG)
-
-pr_body = (
-    f"Automated submission from RESPINOW-realtime.\n\nAdds the **KIT-simple_nowcast** nowcasts for {forecast_date}."
-)
-open_pr(hub_repo, hub_fork, NOWCAST_BRANCH, NOWCAST_MSG, pr_body)
-
-# # ==========================================================================
-# # 2) Submit HHH4 forecasts
-# # ==========================================================================
-sync_fork(hub_fork)
-create_branch(hub_fork, HHH4_BRANCH)
-
-hhh4_in = ROOT / f"forecasts/hhh4-coupling/{forecast_date}-icosari-sari-hhh4-coupling.csv"
-hhh4_out = f"submissions/icosari/sari/KIT-hhh4/{forecast_date}-icosari-sari-KIT-hhh4.csv"
-
-content = hhh4_in.read_text()
-
-write_file_to_branch(hub_fork, HHH4_BRANCH, hhh4_out, content, HHH4_MSG)
-
-pr_body = f"Automated submission from RESPINOW-realtime.\n\nAdds the **KIT-hhh4** forecasts for {forecast_date}."
-open_pr(hub_repo, hub_fork, HHH4_BRANCH, HHH4_MSG, pr_body)
-
-# # ==========================================================================
-# # 3) ML forecasts
-# # ==========================================================================
-generate_forecasts("lightgbm", forecast_date, data_mode="no_covariates", modes="coupling")
-generate_forecasts("tsmixer", forecast_date, data_mode="no_covariates", modes="coupling")
-
-commit_and_push(realtime_repo, "forecasts", ML_MSG)
-
-sync_fork(hub_fork)
-create_branch(hub_fork, ML_BRANCH)
-
-for model, name in [
-    ("lightgbm", "KIT-LightGBM"),
-    ("tsmixer", "KIT-TSMixer"),
-]:
-    ml_in = (
-        ROOT
-        / f"forecasts/{model}-no_covariates-coupling/{forecast_date}-icosari-sari-{model}-no_covariates-coupling.csv"
+def expected_outputs(cfg, forecast_date: str):
+    nowcast_file = (
+        ROOT / "nowcasts" / "simple_nowcast" / f"{forecast_date}-{cfg['source']}-{cfg['target']}-simple_nowcast.csv"
     )
-    ml_out = f"submissions/icosari/sari/{name}/{forecast_date}-icosari-sari-{name}.csv"
+    hhh4_file = (
+        ROOT / "forecasts" / "hhh4-coupling" / f"{forecast_date}-{cfg['source']}-{cfg['target']}-hhh4-coupling.csv"
+    )
+    return nowcast_file, hhh4_file
 
-    content = ml_in.read_text()
 
-    write_file_to_branch(hub_fork, ML_BRANCH, ml_out, content, ML_MSG)
+def run_r_nowcast_and_hhh4(rscript: str, forecast_date: str, targets):
+    calls: list[str] = []
+    for cfg in targets:
+        calls.append(
+            'renv::run("nowcasting/nowcasting.R", '
+            f'args = c("--disease={cfg["target"]}", "--forecast_date={forecast_date}"))'
+        )
+        calls.append(
+            'renv::run("hhh4/hhh4_default.R", '
+            f'args = c("--disease={cfg["target"]}", "--forecast_date={forecast_date}"))'
+        )
 
-pr_body = (
-    "Automated submission from RESPINOW-realtime.\n\n"
-    f"Adds the **KIT-LightGBM** and **KIT-TSMixer** forecasts for {forecast_date}."
-)
-open_pr(hub_repo, hub_fork, ML_BRANCH, ML_MSG, pr_body)
+    expr = f'setwd("{(ROOT / "r").as_posix()}"); renv::activate(); renv::restore(prompt = FALSE); ' + "; ".join(calls)
+
+    subprocess.run(
+        [rscript, "--vanilla", "-e", expr],
+        cwd=ROOT,
+        check=True,
+    )
+
+
+def submit_target(cfg, forecast_date: str, hub_fork, hub_repo):
+    nowcast_branch = f"nowcast/{cfg['branch_prefix']}{forecast_date}"
+    hhh4_branch = f"hhh4/{cfg['branch_prefix']}{forecast_date}"
+    ml_branch = f"submission/{cfg['branch_prefix']}{forecast_date}"
+
+    nowcast_msg = f"Add nowcasts for {cfg['target'].upper()} ({forecast_date})"
+    hhh4_msg = f"Add KIT-hhh4 forecasts for {cfg['target'].upper()} ({forecast_date})"
+    ml_msg = f"Add KIT-LightGBM and KIT-TSMixer forecasts for {cfg['target'].upper()} ({forecast_date})"
+
+    # 1) NOWCAST
+    prepare_branch(hub_fork, nowcast_branch)
+
+    nowcast_in, hhh4_in = expected_outputs(cfg, forecast_date)
+    nowcast_out = (
+        f"{cfg['hub_path']}/KIT-simple_nowcast/{forecast_date}-{cfg['source']}-{cfg['target']}-KIT-simple_nowcast.csv"
+    )
+    df = pd.read_csv(nowcast_in)
+    df = df.loc[(df["type"] != "quantile") | (df["quantile"].isin(QUANTILES))]
+    write_file_to_branch(
+        hub_fork,
+        nowcast_branch,
+        nowcast_out,
+        df.to_csv(index=False),
+        nowcast_msg,
+    )
+    open_pr(
+        hub_repo,
+        hub_fork,
+        nowcast_branch,
+        nowcast_msg,
+        f"Automated submission from RESPINOW-realtime.\n\nAdds the **KIT-simple_nowcast** nowcasts for {forecast_date}.",
+    )
+
+    # 2) HHH4
+    prepare_branch(hub_fork, hhh4_branch)
+
+    hhh4_out = f"{cfg['hub_path']}/KIT-hhh4/{forecast_date}-{cfg['source']}-{cfg['target']}-KIT-hhh4.csv"
+    write_file_to_branch(
+        hub_fork,
+        hhh4_branch,
+        hhh4_out,
+        hhh4_in.read_text(),
+        hhh4_msg,
+    )
+    open_pr(
+        hub_repo,
+        hub_fork,
+        hhh4_branch,
+        hhh4_msg,
+        f"Automated submission from RESPINOW-realtime.\n\nAdds the **KIT-hhh4** forecasts for {forecast_date}.",
+    )
+
+    # 3) ML
+    generate_forecasts(
+        "lightgbm",
+        forecast_date,
+        target=cfg["target"],
+        data_mode="no_covariates",
+        modes="coupling",
+    )
+    generate_forecasts(
+        "tsmixer",
+        forecast_date,
+        target=cfg["target"],
+        data_mode="no_covariates",
+        modes="coupling",
+    )
+
+    prepare_branch(hub_fork, ml_branch)
+
+    for model, name in ML_MODELS:
+        ml_in = (
+            ROOT
+            / f"forecasts/{model}-no_covariates-coupling/{forecast_date}-{cfg['source']}-{cfg['target']}-{model}-no_covariates-coupling.csv"
+        )
+        ml_out = f"{cfg['hub_path']}/{name}/{forecast_date}-{cfg['source']}-{cfg['target']}-{name}.csv"
+        write_file_to_branch(hub_fork, ml_branch, ml_out, ml_in.read_text(), ml_msg)
+
+    open_pr(
+        hub_repo,
+        hub_fork,
+        ml_branch,
+        ml_msg,
+        "Automated submission from RESPINOW-realtime.\n\n"
+        f"Adds the **KIT-LightGBM** and **KIT-TSMixer** forecasts for {forecast_date}.",
+    )
+
+
+def main():
+    rscript = detect_rscript()
+    forecast_date = str(get_preceding_thursday(pd.Timestamp.now().date()).date())
+
+    realtime_repo = Repo(ROOT)
+
+    # Pick whichever target becomes available first, run it, then re-check the other.
+    max_wait_hours = 24
+    interval_min = 30
+    deadline = time.time() + max_wait_hours * 3600
+
+    remaining = TARGETS.copy()
+    hub_fork = hub_repo = None
+    while remaining and time.time() < deadline:
+        ready_cfg = None
+        for cfg in remaining:
+            if hub_data_is_ready(cfg["source"], cfg["target"]):
+                ready_cfg = cfg
+                break
+
+        if ready_cfg is None:
+            time.sleep(interval_min * 60)
+            continue
+
+        remaining.remove(ready_cfg)
+
+        # Refresh local data once something is ready (downloads both SARI+ARE inputs).
+        download_latest_data()
+        commit_and_push(realtime_repo, "data", f"Update data for {forecast_date}")
+
+        # If the other target isn't ready yet, we'll still run the available one now,
+        # then loop back and keep checking until deadline.
+
+        run_r_nowcast_and_hhh4(rscript, forecast_date, [ready_cfg])
+
+        nowcast_file, hhh4_file = expected_outputs(ready_cfg, forecast_date)
+        wait_for_files([nowcast_file, hhh4_file], timeout=300, interval=2)
+
+        commit_and_push(
+            realtime_repo,
+            "nowcasts",
+            f"Add nowcasts for {ready_cfg['target'].upper()} ({forecast_date})",
+        )
+        commit_and_push(
+            realtime_repo,
+            "forecasts",
+            f"Add KIT-hhh4 forecasts for {ready_cfg['target'].upper()} ({forecast_date})",
+        )
+
+        if hub_fork is None or hub_repo is None:
+            hub_fork, hub_repo = connect_repos()
+        submit_target(ready_cfg, forecast_date, hub_fork, hub_repo)
+        commit_and_push(
+            realtime_repo,
+            "forecasts",
+            f"Add ML forecasts for {ready_cfg['target'].upper()} ({forecast_date})",
+        )
+
+    if remaining:
+        skipped = ", ".join(f"{c['source']}/{c['target']}" for c in remaining)
+        print(f"Timed out waiting for: {skipped}")
+
+
+if __name__ == "__main__":
+    main()
