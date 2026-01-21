@@ -99,6 +99,8 @@ Add:
 
 For example `export GITHUB_TOKEN=ghp_123456789`.
 
+(In nano, edit normally, save: `Ctrl + O` → Enter, exit: `Ctrl + X`)
+
 Lock down permissions:
 
 `chmod 600 ~/.github_token`
