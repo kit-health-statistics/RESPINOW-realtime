@@ -80,6 +80,34 @@ Notes:
 
 ------------------------------------------------------------------------
 
+## 5. GitHub authentication (cron / automation)
+
+For non-interactive scripts (cron jobs), GitHub credentials must be provided via an environment variable.
+First, create a classic GitHub Personal Access Token (PAT) in your GitHub account settings with the permissions 'repo' and 'workflow'.
+
+Create a token file:
+
+`nano ~/.github_token`
+
+Add:
+
+`export GITHUB_TOKEN="PASTE_YOUR_TOKEN_HERE" (without quotes)`
+
+For example `export GITHUB_TOKEN=ghp_123456789`.
+
+Lock down permissions:
+
+`chmod 600 ~/.github_token`
+
+Your cron job should source this file (so it can access the environment variable `GITHUB_TOKEN`):
+
+`. "$HOME/.github_token"`
+
+Never commit this file or print the token to the console.
+
+------------------------------------------------------------------------
+
+
 ## Summary
 
 You now have:
@@ -88,4 +116,5 @@ You now have:
 -   dedicated Jupyter kernel: respinow-realtime
 -   pinned R version (4.5.1)
 -   fully reproducible R packages via renv
+-   secure GitHub authentication for automation
 
