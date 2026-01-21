@@ -29,7 +29,7 @@ TARGETS = [
 ]
 
 HUB_REPO = "KITmetricslab/RESPINOW-Hub"
-HUB_FORK = "dwolffram/RESPINOW-Hub"
+HUB_FORK = "kit-health-statistics-acc/RESPINOW-Hub"
 ML_MODELS = [("lightgbm", "KIT-LightGBM"), ("tsmixer", "KIT-TSMixer")]
 
 
