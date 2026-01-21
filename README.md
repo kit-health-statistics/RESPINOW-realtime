@@ -65,6 +65,10 @@ This installs an additional R version but does not change the default, so you al
 
 ## 4. Restore R environment with renv
 
+First, install `renv` for this R version (run once):
+
+`~/R/4.5.1/bin/Rscript --vanilla -e 'install.packages("renv", repos="https://cloud.r-project.org")'`
+
 Inside the `r` folder of this repo, start the correct R version:
 
 `~/R/4.5.1/bin/R`
