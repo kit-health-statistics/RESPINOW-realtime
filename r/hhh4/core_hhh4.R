@@ -107,23 +107,35 @@ for (i in seq_along(forecast_dates)) {
       if (skip_last) {
         ts_temp <- ts_temp[-nrow(ts_temp), ]
       }
+      
+      # add max_horizon rows
+      dates_to_add <- seq(from = tail(ts_temp$date, 1) + 7, by = 7, length.out = max_horizon)
+      ts_temp_to_add <- data.frame(date = dates_to_add,
+                                   year = lubridate::year(dates_to_add),
+                                   week = lubridate::isoweek(dates_to_add),
+                                   location = ts_temp$location[1],
+                                   age_group = ts_temp$age_group[1],
+                                   value = NA)
+      ts_temp <- rbind(ts_temp, ts_temp_to_add)
 
       # set up data for model fits
       # if skip_last, an additional week needs to be predicted, already covered in max_horizon
       sts_temp <- sts(
-        c(round(ts_temp$value), rep(NA, max_horizon)),
+        round(ts_temp$value),
         start = c(ts_temp$year[1], ts_temp$week[1])
       )
       # choose control
       ctrl_temp <- if (ag == "00+") ctrl else ctrl_strat
       ctrl_temp$subset <- 6:nrow(ts_temp)
+      ctrl_temp$data <- list(christmas = as.numeric(ts_temp$week %in% c(52, 53, 1)))
+      
       # fit model
       fit_temp <- hhh4_lag(sts_temp, control = ctrl_temp)
 
       # get moment-based predictions
       forecast_temp <- predictive_moments(
         fit_temp,
-        t_condition = nrow(ts_temp),
+        t_condition = nrow(ts_temp) - max_horizon,
         lgt = max_horizon
       )
       # store:
@@ -143,7 +155,8 @@ for (i in seq_along(forecast_dates)) {
     )
 
     # identify target end dates:
-    target_end_dates <- max(ts_temp$date) + 7 * (1:max_horizon) # also works for skip_last == TRUE
+    # target_end_dates <- max(ts_temp$date) + 7 * (1:max_horizon) # also works for skip_last == TRUE
+    target_end_dates <- tail(ts_temp$date, max_horizon)
 
     # format everything:
     horizons <- (1:max_horizon) - skip_last # shift horizons if last observation skipped

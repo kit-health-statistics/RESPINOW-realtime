@@ -33,14 +33,14 @@ max_horizon <- 4
 # for pooled data, i.e., "00+": includes end component
 ctrl <- list(
   end = list(f = addSeason2formula(~1, period = 52.25)),
-  ar = list(f = addSeason2formula(~1), period = 52.25),
+  ar = list(f = addSeason2formula(~1 + christmas), period = 52.25),
   family = "NegBin1",
   par_lag = 0.5
 )
 # for age strata: exclude end component (see paper)
 ctrl_strat <- list(
   end = list(f = ~0),
-  ar = list(f = addSeason2formula(~1), period = 52.25),
+  ar = list(f = addSeason2formula(~1 + christmas), period = 52.25),
   family = "NegBin1",
   par_lag = 0.5
 )
